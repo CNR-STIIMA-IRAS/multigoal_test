@@ -1,0 +1,17 @@
+group_name: manipulator
+tool_name: tool0
+approach_distance: 0.1
+planning_time: 5.0
+picking_configurations:
+- [1.248980837684973, -1.2228279109171156, 1.9792593061627755, -2.2428737618677026, 1.553286774142281, 3.2935401617108626]
+
+placing_configurations:
+- [1.7587689246133131, -1.0440371285810663, 1.8202970928099675, -2.2649988858652574, 1.5966332342960703, 2.7853851423904565]
+
+
+request_adapters:
+- default_planner_request_adapters/AddTimeParameterization
+- default_planner_request_adapters/FixWorkspaceBounds
+- default_planner_request_adapters/FixStartStateBounds
+- default_planner_request_adapters/FixStartStateCollision
+- default_planner_request_adapters/FixStartStatePathConstraints
