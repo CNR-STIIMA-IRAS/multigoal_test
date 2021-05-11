@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 
 <launch>
-<rosparam command="load" file="$(find sharework_cembre_moveit_config)/config/dirrt_planning.yaml" ns="node"/>
+<rosparam command="load" file="$(find cella1_ur5_moveit_config)/config/dirrt_planning.yaml" ns="node"/>
 <rosparam command="load" file="$(find multigoal_test)/config/test.yaml" ns="node"/>
 <node pkg="multigoal_test"  type="multigoal_test_node" name="node" output="screen">
   <param  name="planning_plugin" value="pathplan/DIRRTStar" />

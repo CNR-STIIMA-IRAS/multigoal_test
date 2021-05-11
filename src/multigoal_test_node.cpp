@@ -39,6 +39,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <actionlib/client/simple_action_client.h>
 #include <tf/transform_listener.h>
 #include <rosparam_utilities/rosparam_utilities.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <eigen_conversions/eigen_msg.h>
+
 int main(int argc, char **argv)
 {
   ros::init(argc, argv, "node");
@@ -55,6 +58,9 @@ int main(int argc, char **argv)
   std::shared_ptr<tf2_ros::Buffer> tf_buffer = std::make_shared<tf2_ros::Buffer>();
   std::shared_ptr<tf2_ros::TransformListener> tf_listener = std::make_shared<tf2_ros::TransformListener>(*tf_buffer, nh);
 
+
+  std::vector<ros::Publisher> pick_target_pubs;
+  std::vector<ros::Publisher> place_target_pubs;
 
   planning_scene_monitor::PlanningSceneMonitor psm(robot_model_loader,tf_buffer);
   psm.startSceneMonitor();
@@ -101,7 +107,7 @@ int main(int argc, char **argv)
   {
     ROS_INFO("%s/planning_plugin = %s",pnh.getNamespace().c_str(),planning_name.c_str());
   }
-  planning_pipeline::PlanningPipelinePtr planning_pipeline(new planning_pipeline::PlanningPipeline(robot_model, pnh, "planning_plugin", "request_adapters"));
+  planning_pipeline::PlanningPipelinePtr planning_pipeline(new planning_pipeline::PlanningPipeline(robot_model, pnh, "/move_group/planning_plugin", "/move_group/request_adapters"));
   moveit::core::JointModelGroup* jmg=robot_model->getJointModelGroup(group_name);
 
 
@@ -134,9 +140,17 @@ int main(int argc, char **argv)
     return 0;
   }
 
+  int target_pub_number=0;
   for (const Eigen::VectorXd& conf: candidate_picking_configurations)
   {
     state.setJointGroupPositions(group_name,conf);
+    state.updateCollisionBodyTransforms();
+    if (!scene->isStateValid(state,group_name))
+    {
+      ROS_ERROR_STREAM("invalid picking configuration\n"<<conf.transpose()<<"\nskip it");
+      continue;
+    }
+
     Eigen::Isometry3d T_b_t=state.getFrameTransform(tool_name);
     T_b_t.translation()(2)+=approach_distance;
 
@@ -152,6 +166,15 @@ int main(int argc, char **argv)
       state.copyJointGroupPositions(group_name,approach);
       approach_picking_configurations.push_back(approach);
       ROS_INFO_STREAM("Add approach pose for picking configuration\n"<<conf.transpose()<<"\napproach:\n"<<approach.transpose());
+
+      ros::Publisher target_pub=nh.advertise<geometry_msgs::PoseStamped>("target"+std::to_string(target_pub_number++),1,true);
+      pick_target_pubs.push_back(target_pub);
+      geometry_msgs::PoseStamped msg;
+      msg.header.frame_id="world";
+      tf::poseEigenToMsg(state.getFrameTransform(tool_name),msg.pose);
+      pick_target_pubs.back().publish(msg);
+      pick_target_pubs.back().publish(msg);
+
     }
   }
 
@@ -164,9 +187,16 @@ int main(int argc, char **argv)
     return 0;
   }
 
+  target_pub_number=0;
   for (const Eigen::VectorXd& conf: candidate_placing_configurations)
   {
     state.setJointGroupPositions(group_name,conf);
+    if (!scene->isStateValid(state,group_name))
+    {
+      ROS_ERROR_STREAM("invalid placing configuration\n"<<conf.transpose()<<"\nskip it");
+      continue;
+    }
+
     Eigen::Isometry3d T_b_t=state.getFrameTransform(tool_name);
     T_b_t.translation()(2)+=approach_distance;
 
@@ -188,6 +218,13 @@ int main(int argc, char **argv)
       state.copyJointGroupPositions(group_name,approach);
       approach_placing_configurations.push_back(approach);
       ROS_INFO_STREAM("Add approach pose for placing configuration\n"<<conf.transpose()<<"\napproach:\n"<<approach.transpose());
+      ros::Publisher target_pub=nh.advertise<geometry_msgs::PoseStamped>("place"+std::to_string(target_pub_number++),1,true);
+      place_target_pubs.push_back(target_pub);
+      geometry_msgs::PoseStamped msg;
+      msg.header.frame_id="world";
+      tf::poseEigenToMsg(state.getFrameTransform(tool_name),msg.pose);
+      place_target_pubs.back().publish(msg);
+      place_target_pubs.back().publish(msg);
     }
   }
 
@@ -201,131 +238,182 @@ int main(int argc, char **argv)
 
   ros::Rate lp(10);
 
-  Eigen::VectorXd zero_vec;
-  state.copyJointGroupPositions(group_name,zero_vec);
-  zero_vec.setZero();
+  moveit_msgs::Constraints joint_goal;
   while (ros::ok())
   {
     lp.sleep();
+
+    scene=planning_scene::PlanningScene::clone(psm.getPlanningScene());
+    robot_state::RobotState current_state(scene->getCurrentState());
+    robot_state::RobotState goal_state(scene->getCurrentState());
+    robot_state::RobotState pick_approach_state(scene->getCurrentState());
+    robot_state::RobotState pick_state(scene->getCurrentState());
+    robot_state::RobotState place_approach_state(scene->getCurrentState());
+    robot_state::RobotState place_state(scene->getCurrentState());
+    Eigen::VectorXd goal_configuration;
+
+
+    /*
+     * select one pick approach
+     * move to pick approach
+     */
+    moveit::core::robotStateToRobotStateMsg(current_state,req.start_state);
+    req.goal_constraints.clear();
+    for (const Eigen::VectorXd& goal: approach_picking_configurations)
     {
-      scene=planning_scene::PlanningScene::clone(psm.getPlanningScene());
-      robot_state::RobotState current_state(scene->getCurrentState());
-      current_state.setJointGroupVelocities(group_name,zero_vec);
-      robot_state::RobotState goal_state(scene->getCurrentState());
-      moveit::core::robotStateToRobotStateMsg(current_state,req.start_state);
-      goal_state.setJointGroupVelocities(group_name,zero_vec);
-
-      req.goal_constraints.clear();
-      for (const Eigen::VectorXd& goal: approach_picking_configurations)
-      {
-        goal_state.setJointGroupPositions(group_name, goal);
-        moveit_msgs::Constraints joint_goal = kinematic_constraints::constructGoalConstraints(goal_state, jmg);
-        req.goal_constraints.push_back(joint_goal);
-      }
-
-      if (!planning_pipeline->generatePlan(scene,req,res))
-      {
-        ROS_ERROR("unable to plan to approach pick");
-        continue;
-      }
-      Eigen::VectorXd final_configuration;
-      res.trajectory_->getLastWayPoint().copyJointGroupPositions(jmg,final_configuration);
-
-      moveit_msgs::RobotTrajectory trj_msg;
-      res.trajectory_->getRobotTrajectoryMsg(trj_msg);
-      trj_goal.trajectory=trj_msg.joint_trajectory;
-      ROS_INFO("send goal");
-      ac.sendGoalAndWait(trj_goal);
-      ROS_INFO("executed");
-
-      scene=planning_scene::PlanningScene::clone(psm.getPlanningScene());
-      robot_state::RobotState approach_state(scene->getCurrentState());
-      moveit::core::robotStateToRobotStateMsg(current_state,req.start_state);
-
-      req.goal_constraints.clear();
-      for (size_t isol=0;isol<approach_picking_configurations.size();isol++)
-      {
-        if ((final_configuration-approach_picking_configurations.at(isol)).norm()<1e-4)
-        {
-          goal_state.setJointGroupPositions(group_name, picking_configurations.at(isol));
-          moveit_msgs::Constraints joint_goal = kinematic_constraints::constructGoalConstraints(goal_state, jmg);
-          req.goal_constraints.push_back(joint_goal);
-          break;
-        }
-      }
-
-      if (!planning_pipeline->generatePlan(scene,req,res))
-      {
-        ROS_ERROR("unable to plan to pick");
-        continue;
-      }
-      res.trajectory_->getRobotTrajectoryMsg(trj_msg);
-      trj_goal.trajectory=trj_msg.joint_trajectory;
-      ROS_INFO("send goal");
-      ac.sendGoalAndWait(trj_goal);
-      ROS_INFO("executed");
+      goal_state.setJointGroupPositions(group_name, goal);
+      joint_goal = kinematic_constraints::constructGoalConstraints(goal_state, jmg);
+      req.goal_constraints.push_back(joint_goal);
     }
 
+    if (!planning_pipeline->generatePlan(scene,req,res))
     {
-      scene=planning_scene::PlanningScene::clone(psm.getPlanningScene());
-      robot_state::RobotState current_state(scene->getCurrentState());
-      current_state.setJointGroupVelocities(group_name,zero_vec);
-      robot_state::RobotState goal_state(scene->getCurrentState());
-      moveit::core::robotStateToRobotStateMsg(current_state,req.start_state);
-      goal_state.setJointGroupVelocities(group_name,zero_vec);
+      ROS_ERROR("unable to plan to approach pick");
+      break;
+    }
 
-      req.goal_constraints.clear();
-      for (const Eigen::VectorXd& goal: approach_placing_configurations)
+    res.trajectory_->getLastWayPoint().copyJointGroupPositions(jmg,goal_configuration);
+    pick_approach_state.setJointGroupPositions(group_name, goal_configuration);
+
+    moveit_msgs::RobotTrajectory trj_msg;
+    res.trajectory_->getRobotTrajectoryMsg(trj_msg);
+    trj_goal.trajectory=trj_msg.joint_trajectory;
+    ROS_INFO("send goal");
+    ac.sendGoalAndWait(trj_goal);
+    ROS_INFO("executed");
+
+    /*
+     * move to pick
+     */
+    scene=planning_scene::PlanningScene::clone(psm.getPlanningScene());
+    moveit::core::robotStateToRobotStateMsg(pick_approach_state,req.start_state);
+
+    req.goal_constraints.clear();
+    for (size_t isol=0;isol<approach_picking_configurations.size();isol++)
+    {
+      if ((goal_configuration-approach_picking_configurations.at(isol)).norm()<1e-4)
       {
-        goal_state.setJointGroupPositions(group_name, goal);
-        moveit_msgs::Constraints joint_goal = kinematic_constraints::constructGoalConstraints(goal_state, jmg);
+        pick_state.setJointGroupPositions(group_name, picking_configurations.at(isol));
+        joint_goal = kinematic_constraints::constructGoalConstraints(pick_state, jmg);
         req.goal_constraints.push_back(joint_goal);
-      }
-
-      if (!planning_pipeline->generatePlan(scene,req,res))
-      {
-        ROS_ERROR("unable to plan to approach place");
-        continue;
-      }
-      Eigen::VectorXd final_configuration;
-      res.trajectory_->getLastWayPoint().copyJointGroupPositions(jmg,final_configuration);
-
-      moveit_msgs::RobotTrajectory trj_msg;
-      res.trajectory_->getRobotTrajectoryMsg(trj_msg);
-      trj_goal.trajectory=trj_msg.joint_trajectory;
-      ROS_INFO("send goal");
-      ac.sendGoalAndWait(trj_goal);
-      ROS_INFO("executed");
-
-      scene=planning_scene::PlanningScene::clone(psm.getPlanningScene());
-      robot_state::RobotState approach_state(scene->getCurrentState());
-      moveit::core::robotStateToRobotStateMsg(current_state,req.start_state);
-
-      req.goal_constraints.clear();
-      for (size_t isol=0;isol<approach_placing_configurations.size();isol++)
-      {
-        if ((final_configuration-approach_placing_configurations.at(isol)).norm()<1e-4)
-        {
-          goal_state.setJointGroupPositions(group_name, placing_configurations.at(isol));
-          moveit_msgs::Constraints joint_goal = kinematic_constraints::constructGoalConstraints(goal_state, jmg);
-          req.goal_constraints.push_back(joint_goal);
-          break;
-        }
-      }
-
-      if (!planning_pipeline->generatePlan(scene,req,res))
-      {
-        ROS_ERROR("unable to plan to place");
         break;
       }
-      res.trajectory_->getRobotTrajectoryMsg(trj_msg);
-      trj_goal.trajectory=trj_msg.joint_trajectory;
-      ROS_INFO("send goal");
-      ac.sendGoalAndWait(trj_goal);
-      ROS_INFO("executed");
     }
-    break;
+
+    if (!planning_pipeline->generatePlan(scene,req,res))
+    {
+      ROS_ERROR("unable to plan to pick");
+      break;
+    }
+    res.trajectory_->getRobotTrajectoryMsg(trj_msg);
+    trj_goal.trajectory=trj_msg.joint_trajectory;
+    ROS_INFO("send goal");
+    ac.sendGoalAndWait(trj_goal);
+    ROS_INFO("executed");
+
+
+    /*
+     * move back to approach pick
+     */
+    scene=planning_scene::PlanningScene::clone(psm.getPlanningScene());
+
+    moveit::core::robotStateToRobotStateMsg(pick_state,req.start_state);
+    req.goal_constraints.clear();
+    joint_goal = kinematic_constraints::constructGoalConstraints(pick_approach_state, jmg);
+    req.goal_constraints.push_back(joint_goal);
+
+    if (!planning_pipeline->generatePlan(scene,req,res))
+    {
+      ROS_ERROR("unable to plan to approach place");
+      break;
+    }
+    res.trajectory_->getRobotTrajectoryMsg(trj_msg);
+    trj_goal.trajectory=trj_msg.joint_trajectory;
+    ROS_INFO("send goal");
+    ac.sendGoalAndWait(trj_goal);
+    ROS_INFO("executed");
+
+
+    /*
+     * select one place approach
+     * move to place approach
+     */
+    moveit::core::robotStateToRobotStateMsg(pick_approach_state,req.start_state);
+    req.goal_constraints.clear();
+    for (const Eigen::VectorXd& goal: approach_placing_configurations)
+    {
+      goal_state.setJointGroupPositions(group_name, goal);
+      joint_goal = kinematic_constraints::constructGoalConstraints(goal_state, jmg);
+      req.goal_constraints.push_back(joint_goal);
+    }
+
+    if (!planning_pipeline->generatePlan(scene,req,res))
+    {
+      ROS_ERROR("unable to plan to approach place");
+      break;
+    }
+
+    res.trajectory_->getLastWayPoint().copyJointGroupPositions(jmg,goal_configuration);
+    place_approach_state.setJointGroupPositions(group_name, goal_configuration);
+
+    res.trajectory_->getRobotTrajectoryMsg(trj_msg);
+    trj_goal.trajectory=trj_msg.joint_trajectory;
+    ROS_INFO("send goal");
+    ac.sendGoalAndWait(trj_goal);
+    ROS_INFO("executed");
+
+    /*
+     * move to place
+     */
+    scene=planning_scene::PlanningScene::clone(psm.getPlanningScene());
+    moveit::core::robotStateToRobotStateMsg(place_approach_state,req.start_state);
+
+    req.goal_constraints.clear();
+    for (size_t isol=0;isol<approach_placing_configurations.size();isol++)
+    {
+      if ((goal_configuration-approach_placing_configurations.at(isol)).norm()<1e-4)
+      {
+        place_state.setJointGroupPositions(group_name, placing_configurations.at(isol));
+        joint_goal = kinematic_constraints::constructGoalConstraints(place_state, jmg);
+        req.goal_constraints.push_back(joint_goal);
+        break;
+      }
+    }
+
+    if (!planning_pipeline->generatePlan(scene,req,res))
+    {
+      ROS_ERROR("unable to plan to place");
+      break;
+    }
+    res.trajectory_->getRobotTrajectoryMsg(trj_msg);
+    trj_goal.trajectory=trj_msg.joint_trajectory;
+    ROS_INFO("send goal");
+    ac.sendGoalAndWait(trj_goal);
+    ROS_INFO("executed");
+
+
+    /*
+     * move back to approach place
+     */
+    scene=planning_scene::PlanningScene::clone(psm.getPlanningScene());
+
+    moveit::core::robotStateToRobotStateMsg(place_state,req.start_state);
+    req.goal_constraints.clear();
+    joint_goal = kinematic_constraints::constructGoalConstraints(place_approach_state, jmg);
+    req.goal_constraints.push_back(joint_goal);
+
+    if (!planning_pipeline->generatePlan(scene,req,res))
+    {
+      ROS_ERROR("unable to plan to approach place");
+      continue;
+    }
+    res.trajectory_->getRobotTrajectoryMsg(trj_msg);
+    trj_goal.trajectory=trj_msg.joint_trajectory;
+    ROS_INFO("send goal");
+    ac.sendGoalAndWait(trj_goal);
+    ROS_INFO("executed");
   }
+
 
   return 0;
 }

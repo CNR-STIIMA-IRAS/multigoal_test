@@ -11,12 +11,13 @@ find_package(catkin REQUIRED COMPONENTS
   moveit_visual_tools
   name_sorting
   roscpp
+  eigen_conversions
 )
 
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES multigoal_test
-  CATKIN_DEPENDS actionlib actionlib_msgs eigen_matrix_utils moveit_core moveit_ros_planning moveit_ros_planning_interface moveit_visual_tools name_sorting roscpp
+  CATKIN_DEPENDS actionlib actionlib_msgs eigen_conversions eigen_matrix_utils moveit_core moveit_ros_planning moveit_ros_planning_interface moveit_visual_tools name_sorting roscpp
   DEPENDS 
 )
 
